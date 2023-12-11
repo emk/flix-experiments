@@ -1,0 +1,38 @@
+digraph {
+    rankdir="BT"
+    newrank="true"
+
+    inconsistent[label="inconsistent (⊤)"]
+    "array[inconsistent]"[style=dashed]
+    subgraph cluster_instantiable {
+        label="instantiable"
+
+        {
+            rank="same"
+
+            float64[shape="rectangle"]
+            string[shape="rectangle"]
+            "array[T]"[shape="rectangle"]
+        }
+        int64[shape="rectangle"]
+    }
+    "array[unknown]"
+    null
+    unknown[label="unknown (⊥)"]
+
+    float64 -> inconsistent
+    string -> inconsistent
+    "array[inconsistent]" -> inconsistent[style=dashed]
+
+    "array[T]" -> "array[inconsistent]"
+    "array[unknown]" -> "array[T]"
+
+    int64 -> float64
+
+    null -> int64
+    null -> float64
+    null -> string
+    null -> "array[unknown]"
+
+    unknown -> null
+}
