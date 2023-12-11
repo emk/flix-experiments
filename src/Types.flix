@@ -90,13 +90,13 @@ mod Expr {
     }
 
     pub def facts(e: Expr): #{
-        LitType(ExprID, Type),
+        Lit(ExprID, Type),
         Array(ExprID),
         ArrayElem(ExprID, ExprID) | r
     } = match e {
         case Expr.Lit(id, lit) =>
             // Associate literal expression IDs with their types.
-            inject (id, Lit.typeOf(lit)) :: Nil into LitType
+            inject (id, Lit.typeOf(lit)) :: Nil into Lit
         case Expr.Array(id, elem_exprs) =>
             // Declare arrays.
             let array = inject id :: Nil into Array;
@@ -117,14 +117,26 @@ mod Expr {
         //
         // "dummy" needed to avoid https://github.com/flix/flix/issues/4719.
         let rules = #{
-            TypeOf("dummy", lit_id; t) :- LitType(lit_id, t).
-            TypeOf("dummy", array_id; Type.Array(Type.Unknown)) :- Array(array_id).
-            TypeOf("dummy", array_id; Type.Array(t)) :- ElemTypeOf("dummy", array_id; t).
+            // Infer the type of a literal.
+            TypeOf("dummy", lit_id; t) :- Lit(lit_id, t).
+
+            // Infer the type of an array. Several of these rules are likely to
+            // match, and Flix will automatically combine the right-hand types
+            // using `leastUpperBound`.
+            TypeOf("dummy", array_id; Type.Array(Type.Unknown)) :-
+                Array(array_id).
+            TypeOf("dummy", array_id; Type.Array(t)) :-
+                ElemTypeOf("dummy", array_id; t).
             TypeOf("dummy", array_id; Type.Inconsistent) :-
                 ElemTypeOf("dummy", array_id; t),
                 if (t == Type.Inconsistent).
 
-            ElemTypeOf("dummy", array_id; t) :- ArrayElem(array_id, elem_id), TypeOf("dummy", elem_id; t).
+            // This rule is responsible for combining the types of multiple
+            // array elements. It will match once per element, and Flix will
+            // automatically combine the types `t` using `leastUpperBound`.
+            ElemTypeOf("dummy", array_id; t) :-
+                ArrayElem(array_id, elem_id),
+                TypeOf("dummy", elem_id; t).
         };
 
         query rules, facts select (id, t) from TypeOf("dummy", id; t) |> Vector.toMap
