@@ -40,3 +40,51 @@ pub def testTypeOfInconsistentArray(): Bool = Assert.eq(
         Nil
     ))
 )
+
+@Test
+pub def testTypeOfArrayConcat(): Bool = Assert.eq(
+    // ARRAY[42] || ARRAY[10] -> ARRAY[INT64]
+    Map#{
+        1 => Type.Array(Type.Int64),
+        2 => Type.Array(Type.Int64), 3 => Type.Int64,
+        4 => Type.Array(Type.Int64), 5 => Type.Int64
+    },
+    Expr.inferTypes(Expr.ArrayConcat(
+        1,
+        Expr.Array(2, Expr.Lit(3, Lit.Int64(42i64)) :: Nil) ::
+        Expr.Array(4, Expr.Lit(5, Lit.Int64(10i64)) :: Nil) ::
+        Nil
+    ))
+)
+
+@Test
+pub def testTypeOfArrayConcatInconsistent(): Bool = Assert.eq(
+    // ARRAY[42] || ARRAY[3.14] -> inconsistent type
+    Map#{
+        1 => Type.Inconsistent,
+        2 => Type.Array(Type.Int64), 3 => Type.Int64,
+        4 => Type.Array(Type.Float64), 5 => Type.Float64
+    },
+    Expr.inferTypes(Expr.ArrayConcat(
+        1,
+        Expr.Array(2, Expr.Lit(3, Lit.Int64(42i64)) :: Nil) ::
+        Expr.Array(4, Expr.Lit(5, Lit.Float64(3.14f64)) :: Nil) ::
+        Nil
+    ))
+)
+
+@Test
+pub def testTypeOfArrayConcatEmpty(): Bool = Assert.eq(
+    // ARRAY[42] || ARRAY[] -> ARRAY[INT64]
+    Map#{
+        1 => Type.Array(Type.Int64),
+        2 => Type.Array(Type.Int64), 3 => Type.Int64,
+        4 => Type.Array(Type.Unknown)
+    },
+    Expr.inferTypes(Expr.ArrayConcat(
+        1,
+        Expr.Array(2, Expr.Lit(3, Lit.Int64(42i64)) :: Nil) ::
+        Expr.Array(4, Nil) ::
+        Nil
+    ))
+)

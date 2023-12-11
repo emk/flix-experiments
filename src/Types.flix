@@ -80,19 +80,22 @@ mod Lit {
 pub enum Expr {
     case Lit(ExprID, Lit),
     case Array(ExprID, List[Expr])
-    // TODO: case ArrayConcat(ExprID, List[Expr])
+    case ArrayConcat(ExprID, List[Expr])
 }
 
 mod Expr {
     pub def id(e: Expr): ExprID = match e {
         case Expr.Lit(id, _) => id
         case Expr.Array(id, _) => id
+        case Expr.ArrayConcat(id, _) => id
     }
 
     pub def facts(e: Expr): #{
         Lit(ExprID, Type),
         Array(ExprID),
-        ArrayElem(ExprID, ExprID) | r
+        ArrayConcat(ExprID),
+        Arg(ExprID, ExprID)
+        | r
     } = match e {
         case Expr.Lit(id, lit) =>
             // Associate literal expression IDs with their types.
@@ -100,13 +103,26 @@ mod Expr {
         case Expr.Array(id, elem_exprs) =>
             // Declare arrays.
             let array = inject id :: Nil into Array;
-            // Associate arrays with their elements.
-            let elems = inject List.map(elem_expr -> (id, Expr.id(elem_expr)), elem_exprs) into ArrayElem;
-            // Get recursive type facts for the elements.
-            let elem_type_facts = List.map(elem_expr -> Expr.facts(elem_expr), elem_exprs);
-            // Combine our facts.
-            List.foldLeft((f1, f2) -> f1 <+> f2, array <+> elems, elem_type_facts)
+            array <+> Expr.callFacts(id, elem_exprs)
+        case Expr.ArrayConcat(id, array_exprs) =>
+            // Declare array concatenations.
+            let array_concat = inject id :: Nil into ArrayConcat;
+            array_concat <+> Expr.callFacts(id, array_exprs)
     }
+
+    def callFacts(id: ExprID, arg_exprs: List[Expr]): #{
+        Lit(ExprID, Type),
+        Array(ExprID),
+        ArrayConcat(ExprID),
+        Arg(ExprID, ExprID)
+        | r
+    } =
+        // Associate the call with its arguments.
+        let args = inject List.map(arg -> (id, Expr.id(arg)), arg_exprs) into Arg;
+        // Get recursive type facts for the arguments.
+        let arg_types = List.map(arg -> Expr.facts(arg), arg_exprs);
+        // Combine our facts.
+        List.foldLeft((f1, f2) -> f1 <+> f2, args, arg_types)
 
     pub def inferTypes(e: Expr): Map[ExprID, Type] =
         // Get all our raw facts.
@@ -118,26 +134,47 @@ mod Expr {
         // "dummy" needed to avoid https://github.com/flix/flix/issues/4719.
         let rules = #{
             // Infer the type of a literal.
-            TypeOf("dummy", lit_id; t) :- Lit(lit_id, t).
+            Type("dummy", lit_id; t) :- Lit(lit_id, t).
 
             // Infer the type of an array. Several of these rules are likely to
             // match, and Flix will automatically combine the right-hand types
             // using `leastUpperBound`.
-            TypeOf("dummy", array_id; Type.Array(Type.Unknown)) :-
+            Type("dummy", array_id; Type.Array(Type.Unknown)) :-
                 Array(array_id).
-            TypeOf("dummy", array_id; Type.Array(t)) :-
-                ElemTypeOf("dummy", array_id; t).
-            TypeOf("dummy", array_id; Type.Inconsistent) :-
-                ElemTypeOf("dummy", array_id; t),
-                if (t == Type.Inconsistent).
+            Type("dummy", array_id; Type.Array(t)) :-
+                ArrayElemType("dummy", array_id; t).
 
             // This rule is responsible for combining the types of multiple
             // array elements. It will match once per element, and Flix will
-            // automatically combine the types `t` using `leastUpperBound`.
-            ElemTypeOf("dummy", array_id; t) :-
-                ArrayElem(array_id, elem_id),
-                TypeOf("dummy", elem_id; t).
+            // automatically combine the types `t` of each element using
+            // `leastUpperBound`.
+            ArrayElemType("dummy", array_id; t) :-
+                Array(array_id),
+                Arg(array_id, elem_id),
+                Type("dummy", elem_id; t).
+
+            // Infer the type of an array concatenation.
+            Type("dummy", array_concat_id; Type.Array(Type.Unknown)) :-
+                ArrayConcat(array_concat_id).
+            Type("dummy", array_concat_id; t) :-
+                ArrayConcatArgType("dummy", array_concat_id; t).
+
+            // Figure out the type of an array concatenation argument.
+            ArrayConcatArgType("dummy", array_concat_id; t) :-
+                ArrayConcat(array_concat_id),
+                Arg(array_concat_id, arg_id),
+                Type("dummy", arg_id; t).
+
+            // Propagate inconsistent types up into any wrapping types. This
+            // relies on combining the old and new types using
+            // `leastUpperBound`.
+            Type("dummy", array_id; Type.Inconsistent) :-
+                Type("dummy", array_id; t),
+                // This isn't actually monotonic in the sense that it should
+                // be! But the rule as a whole should converge, which may or
+                // may not be good enough. I need to read the docs.
+                if (t == Type.Array(Type.Inconsistent)).
         };
 
-        query rules, facts select (id, t) from TypeOf("dummy", id; t) |> Vector.toMap
+        query rules, facts select (id, t) from Type("dummy", id; t) |> Vector.toMap
 }
