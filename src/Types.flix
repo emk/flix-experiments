@@ -9,11 +9,22 @@ pub enum Type with Eq, Order, ToString {
     case String,
     case Null,
     // Arrays do not inherit subtyping from their element types. Int64 is a
-    // subtype of Float64, but ARRAY(Int64) is not a subtype of ARRAY(Float64).
+    // subtype of Float64, but Array(Int64) is not a subtype of Array(Float64).
     case Array(Type),
     // `Unknown` is a subtype of all other types. It's `Bottom` (⊥) in our
-    // lattice. `ARRAY[]` has the type `ARRAY(Unknown)`.
+    // lattice. `ARRAY[]` has the type `Array(Unknown)`.
     case Unknown
+}
+
+mod Type {
+    // Propagate inconsistent types up into any wrapping types.
+    //
+    // This is monotone function, so it can be used in the final position of a
+    // lattice rule.
+    pub def propagateInconsistent(t: Type): Type = match t {
+        case Type.Array(Type.Inconsistent) => Type.Inconsistent
+        case _ => t
+    }
 }
 
 instance LowerBound[Type] {
@@ -59,8 +70,21 @@ instance MeetLattice[Type] {
             Type.Unknown
 }
 
+// Should we do bottom-up type inference, or should we do full bidirectional
+// type inference?
+pub enum InferenceDirection {
+    // Infer types bottom-up, starting from literals and working up to
+    // expressions.
+    case Up,
+
+    // The same as `Up`, but also infer types top-down.
+    case Bidirectional
+}
+
+// We identify expressions in our AST using unique IDs.
 pub type alias ExprID = Int32
 
+// A literal value.
 pub enum Lit {
     case Int64(Int64),
     case Float64(Float64),
@@ -69,6 +93,7 @@ pub enum Lit {
 }
 
 mod Lit {
+    // Get the type of a literal.
     pub def typeOf(x: Lit): Type = match x {
         case Lit.Int64(_) => Type.Int64
         case Lit.Float64(_) => Type.Float64
@@ -77,20 +102,35 @@ mod Lit {
     }
 }
 
+// An expression.
 pub enum Expr {
+    // A literal expression.
     case Lit(ExprID, Lit),
+    // An `ARRAY[arg1, ...]` expression which constructs an array.
     case Array(ExprID, List[Expr])
+    // An `ARRAY_CONCAT[arg1, ...]` expression which concatenates arrays of
+    // the same type.
     case ArrayConcat(ExprID, List[Expr])
 }
 
 mod Expr {
+    // Get the ID of an expression.
     pub def id(e: Expr): ExprID = match e {
         case Expr.Lit(id, _) => id
         case Expr.Array(id, _) => id
         case Expr.ArrayConcat(id, _) => id
     }
 
-    pub def facts(e: Expr): #{
+    // Get basic facts about an expression, recursively. Think of this as a
+    // collection of tables:
+    //
+    //   - `Lit(id, t)` marks an expression as a literal with type `t`.
+    //   - `Array(id)` marks an expression as an `ARRAY` call.
+    //   - `ArrayConcat(id)` marks an expression as an `ARRAY_CONCAT` call.
+    //   - `Arg(id, arg_id)` associates an argument with its call.
+    //
+    // These relations / "tables" are the raw input to our inference rules.
+    def facts(e: Expr): #{
         Lit(ExprID, Type),
         Array(ExprID),
         ArrayConcat(ExprID),
@@ -110,7 +150,8 @@ mod Expr {
             array_concat <+> Expr.callFacts(id, array_exprs)
     }
 
-    def callFacts(id: ExprID, arg_exprs: List[Expr]): #{
+    // Helper function to get facts about a call expression.
+    def callFacts(call_id: ExprID, arg_exprs: List[Expr]): #{
         Lit(ExprID, Type),
         Array(ExprID),
         ArrayConcat(ExprID),
@@ -118,13 +159,18 @@ mod Expr {
         | r
     } =
         // Associate the call with its arguments.
-        let args = inject List.map(arg -> (id, Expr.id(arg)), arg_exprs) into Arg;
+        let args = inject List.map(arg -> (call_id, Expr.id(arg)), arg_exprs) into Arg;
         // Get recursive type facts for the arguments.
         let arg_types = List.map(arg -> Expr.facts(arg), arg_exprs);
         // Combine our facts.
         List.foldLeft((f1, f2) -> f1 <+> f2, args, arg_types)
 
-    pub def inferTypes(e: Expr): Map[ExprID, Type] =
+    // Infer the types of an expression and all its subexpressions. If `dir` is
+    // `Up`, we infer types bottom-up, starting from literals and working up to
+    // expressions. If `dir` is `Bidirectional`, we also infer types top-down,
+    // allowing us to determine (for example) that a particular `NULL` value
+    // might be an `FLOAT64` based on context.
+    pub def inferTypes(dir: InferenceDirection, e: Expr): Map[ExprID, Type] =
         // Get all our raw facts.
         let facts = Expr.facts(e);
         //debug(facts);
@@ -139,6 +185,10 @@ mod Expr {
             // Infer the type of an array. Several of these rules are likely to
             // match, and Flix will automatically combine the right-hand types
             // using `leastUpperBound`.
+            //
+            // Think of arguments to the left of the `;` as the "primary key"
+            // for the relation. The argument after is a lattice value, which we
+            // be automatically "reduced" whenever we have multiple rows.
             Type("dummy", array_id; Type.Array(Type.Unknown)) :-
                 Array(array_id).
             Type("dummy", array_id; Type.Array(t)) :-
@@ -157,10 +207,6 @@ mod Expr {
             Type("dummy", array_concat_id; Type.Array(Type.Unknown)) :-
                 ArrayConcat(array_concat_id).
             Type("dummy", array_concat_id; t) :-
-                ArrayConcatArgType("dummy", array_concat_id; t).
-
-            // Figure out the type of an array concatenation argument.
-            ArrayConcatArgType("dummy", array_concat_id; t) :-
                 ArrayConcat(array_concat_id),
                 Arg(array_concat_id, arg_id),
                 Type("dummy", arg_id; t).
@@ -168,13 +214,28 @@ mod Expr {
             // Propagate inconsistent types up into any wrapping types. This
             // relies on combining the old and new types using
             // `leastUpperBound`.
-            Type("dummy", array_id; Type.Inconsistent) :-
-                Type("dummy", array_id; t),
-                // This isn't actually monotonic in the sense that it should
-                // be! But the rule as a whole should converge, which may or
-                // may not be good enough. I need to read the docs.
-                if (t == Type.Array(Type.Inconsistent)).
+            Type("dummy", id; Type.propagateInconsistent(t)) :-
+                Type("dummy", id; t).
         };
 
-        query rules, facts select (id, t) from Type("dummy", id; t) |> Vector.toMap
+        // Optional "push down" rules.
+        let push_down_rules = match dir {
+            case InferenceDirection.Up => #{}
+            case InferenceDirection.Bidirectional => #{
+                // "Push down" the type of an ARRAY call's element down into its
+                // arguments.
+                Type("dummy", arg_id; t) :-
+                    ArrayElemType("dummy", array_id; t),
+                    Arg(array_id, arg_id).
+
+                // "Push down" the type of an ARRAY_CONCAT into its arguments.
+                Type("dummy", arg_id; t) :-
+                    ArrayConcat(array_concat_id),
+                    Arg(array_concat_id, arg_id),
+                    Type("dummy", array_concat_id; t).
+            }
+        };
+
+        query rules, push_down_rules, facts
+            select (id, t) from Type("dummy", id; t) |> Vector.toMap
 }
